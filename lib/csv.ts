@@ -41,6 +41,11 @@ export function detectDelimiter(headerLine: string): string {
 /**
  * Splits one already-complete line into fields, honouring quotes. Callers that
  * may face embedded newlines inside quoted fields should use parseCsv instead.
+ *
+ * A double quote only opens a quoted field when it is the first character of
+ * that field. Anywhere else it is an ordinary character, because that is what
+ * suppliers mean by it: `Gas Lift 7" Black` is seven inches, not the start of
+ * some quoting scheme.
  */
 export function splitLine(line: string, delimiter: string): string[] {
   const out: string[] = []
@@ -59,7 +64,7 @@ export function splitLine(line: string, delimiter: string): string[] {
       } else {
         field += ch
       }
-    } else if (ch === '"') {
+    } else if (ch === '"' && field === '') {
       inQuotes = true
     } else if (ch === delimiter) {
       out.push(field)
@@ -75,6 +80,16 @@ export function splitLine(line: string, delimiter: string): string[] {
 /**
  * Walks a CSV body a row at a time, coping with newlines inside quoted fields.
  * Blank lines are skipped: a trailing newline is the norm, not a row.
+ *
+ * A double quote opens a quoted field only when it is the first character of
+ * that field, which is both the rule every other CSV reader follows and the
+ * only reading that survives real supplier files. Treating a quote anywhere as
+ * an opening quote is not a cosmetic difference: an inch mark in a description
+ * (`Gas Lift 7" Black`) then swallows the line ending, the next row is absorbed
+ * into that field, and its product code vanishes from the import entirely. The
+ * live feed this was written against did exactly that to twelve rows, and the
+ * six of them the shop sells silently stopped receiving stock counts while
+ * being reported as absent from the supplier's file.
  *
  * A generator rather than an array, because the supplier file this was written
  * for is fifty thousand rows and six megabytes. The import only ever needs one
@@ -103,7 +118,7 @@ export function* iterateCsvRows(text: string, delimiter?: string): Generator<str
       }
       continue
     }
-    if (ch === '"') {
+    if (ch === '"' && field === '') {
       inQuotes = true
       touched = true
     } else if (ch === delim) {
