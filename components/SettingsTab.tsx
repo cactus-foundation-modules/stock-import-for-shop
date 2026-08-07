@@ -1,8 +1,14 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { FREQUENCY_OPTIONS } from '@/modules/stock-import-for-shop/lib/schedule'
-import type { StkLogEntry, StkProbeResult, StkSettings } from '@/modules/stock-import-for-shop/lib/types'
+import type {
+  StkLogEntry,
+  StkMissingProduct,
+  StkMissingReport,
+  StkProbeResult,
+  StkSettings,
+} from '@/modules/stock-import-for-shop/lib/types'
 
 // A sub-tab of shop's settings tab rather than a top-level Settings tab, hosted
 // through the 'shop.settings-sub-tabs' slot (manifest `host`). Shop lends the
@@ -27,6 +33,17 @@ function readableSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * Where this site's admin lives. The admin path is a per-site setting and this
+ * panel is handed no props by its host, so it comes off the address bar - which
+ * is always /<adminPath>/config while this tab is on screen.
+ */
+function adminBase(): string {
+  if (typeof window === 'undefined') return ''
+  const first = window.location.pathname.split('/').filter(Boolean)[0]
+  return first ? `/${first}` : ''
 }
 
 const STATUS_COLOUR: Record<StkLogEntry['status'], string> = {
@@ -358,6 +375,10 @@ export function StockImportSettingsTab() {
 
       <hr style={hr} />
 
+      <MissingProducts configured={!!settings.csvUrl} />
+
+      <hr style={hr} />
+
       <h3 style={heading}>Recent checks</h3>
       {log.length === 0 ? (
         <p style={muted}>Nothing yet. The first check will show up here.</p>
@@ -395,6 +416,218 @@ export function StockImportSettingsTab() {
         </div>
       )}
     </form>
+  )
+}
+
+// Which products the supplier's file does not cover, by name.
+//
+// The count on its own has never been much use: "412 of your products are not
+// in the file" could be a range the supplier has dropped, a batch imported
+// under the wrong codes, or four hundred variations of one chair, and no amount
+// of staring at the number tells them apart. So: the list, grouped under the
+// listing each variation belongs to, searchable, and downloadable for the email
+// to the supplier that usually follows.
+const PAGE = 100
+
+const PRODUCT_STATUS_WORD: Record<StkMissingProduct['status'], string> = {
+  DRAFT: 'Draft',
+  ACTIVE: 'Live',
+  ARCHIVED: 'Archived',
+}
+
+function MissingProducts({ configured }: { configured: boolean }) {
+  const [report, setReport] = useState<StkMissingReport | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  const [shown, setShown] = useState(PAGE)
+
+  const matches = useMemo(() => {
+    const products = report?.products ?? []
+    const needle = query.trim().toLowerCase()
+    if (!needle) return products
+    return products.filter((p) =>
+      `${p.sku} ${p.name} ${p.parentName ?? ''}`.toLowerCase().includes(needle)
+    )
+  }, [report, query])
+
+  async function load() {
+    setLoading(true)
+    setError('')
+    setReport(null)
+    setQuery('')
+    setShown(PAGE)
+    try {
+      const res = await fetch(`${BASE}/missing`, { cache: 'no-store' })
+      const data = await res.json()
+      if (!res.ok) setError(data.error || 'Could not read that file.')
+      else setReport(data.report)
+    } catch {
+      setError('Could not reach your supplier from here.')
+    }
+    setLoading(false)
+  }
+
+  // Fetched rather than linked, so the wait has a spinner on it and an error
+  // arrives as an error. A plain link would spend those seconds looking like a
+  // dead button and then save the failure message as a .csv.
+  async function download() {
+    setDownloading(true)
+    setError('')
+    try {
+      const res = await fetch(`${BASE}/missing?format=csv`, { cache: 'no-store' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(data.error || 'Could not build that list.')
+      } else {
+        const url = URL.createObjectURL(await res.blob())
+        const link = document.createElement('a')
+        link.href = url
+        link.download = 'products-not-in-stock-file.csv'
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        URL.revokeObjectURL(url)
+      }
+    } catch {
+      setError('Could not build that list.')
+    }
+    setDownloading(false)
+  }
+
+  const base = adminBase()
+
+  return (
+    <>
+      <h3 style={heading}>Products not in your supplier&rsquo;s file</h3>
+      <p style={{ ...muted, marginTop: '-0.25rem', marginBottom: '1rem' }}>
+        Everything in your shop your supplier&rsquo;s file never mentions. Their stock counts are left exactly as they
+        are, which is right when the file is one supplier&rsquo;s range and worth a look when it is meant to be the lot.
+      </p>
+
+      <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
+        <button type="button" className="btn btn-secondary" onClick={load} disabled={loading || !configured}>
+          {loading ? 'Reading the file…' : report ? 'Check again' : 'Show me which ones'}
+        </button>
+        {report && report.total > 0 && (
+          <button type="button" className="btn btn-secondary" onClick={download} disabled={downloading}>
+            {downloading ? 'Building the list…' : 'Download the full list'}
+          </button>
+        )}
+        {!configured && <span style={{ ...muted, fontSize: '0.875rem' }}>Add a stock file address first, and save it.</span>}
+      </div>
+
+      {error && (
+        <div className="alert alert-danger" style={{ marginBottom: '1rem' }}>
+          {error}
+        </div>
+      )}
+
+      {report && report.total === 0 && (
+        <p style={muted}>
+          Nothing missing. Every product in your shop with a code appears somewhere in that file.
+        </p>
+      )}
+
+      {report && report.total > 0 && (
+        <>
+          <p style={{ marginBottom: '0.75rem' }}>
+            {n(report.total, 'product')} in your shop{' '}
+            {report.total === 1 ? 'has a code that is' : 'have codes that are'} nowhere in that file&rsquo;s{' '}
+            {n(report.rowsInFile, 'row')}.
+            {report.truncated && (
+              <span style={{ ...muted, display: 'block', marginTop: '0.3rem', fontSize: '0.875rem' }}>
+                The first {report.products.length.toLocaleString('en-GB')} are below. Download the full list for the
+                rest.
+              </span>
+            )}
+          </p>
+
+          <input
+            type="search"
+            className="form-input"
+            placeholder="Search these by code, name or listing"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setShown(PAGE)
+            }}
+            // Inside the settings form, so Enter would otherwise save the whole
+            // tab while somebody is only narrowing a list.
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.preventDefault()
+            }}
+            style={{ width: '100%', maxWidth: '26rem', marginBottom: '0.75rem' }}
+          />
+
+          {matches.length === 0 ? (
+            <p style={muted}>Nothing here matches &ldquo;{query.trim()}&rdquo;.</p>
+          ) : (
+            <>
+              <div style={{ overflowX: 'auto' }}>
+                <table className="table" style={{ width: '100%' }}>
+                  <thead>
+                    <tr>
+                      <th>Code</th>
+                      <th>Product</th>
+                      <th>Part of</th>
+                      <th>Status</th>
+                      <th style={{ textAlign: 'right' }}>Stock now</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {matches.slice(0, shown).map((product) => (
+                      <tr key={product.id}>
+                        <td style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono, monospace)' }}>
+                          {product.sku}
+                        </td>
+                        <td>
+                          <a href={`${base}/m/shop/products/${product.id}`}>{product.name}</a>
+                        </td>
+                        <td>
+                          {product.parentName ? (
+                            product.parentId ? (
+                              <a href={`${base}/m/shop/products/${product.parentId}`}>{product.parentName}</a>
+                            ) : (
+                              product.parentName
+                            )
+                          ) : (
+                            <span style={muted}>a listing of its own</span>
+                          )}
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>{PRODUCT_STATUS_WORD[product.status] ?? product.status}</td>
+                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          {product.stock === null ? (
+                            <span style={muted}>not set</span>
+                          ) : (
+                            product.stock.toLocaleString('en-GB')
+                          )}
+                          {product.stock !== null && !product.tracked && (
+                            <span style={{ ...muted, fontSize: '0.8125rem' }}> (not enforced)</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {matches.length > shown && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ marginTop: '0.75rem' }}
+                  onClick={() => setShown((current) => current + PAGE)}
+                >
+                  Show more ({(matches.length - shown).toLocaleString('en-GB')} to go)
+                </button>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </>
   )
 }
 
@@ -444,7 +677,8 @@ function ProbeReport({ probe, settings }: { probe: StkProbeResult; settings: Stk
               {probe.missingSkus > 0 && (
                 <>
                   {n(probe.missingSkus, 'product', 'products')} in your shop {probe.missingSkus === 1 ? 'is' : 'are'}{' '}
-                  not mentioned in it.
+                  not mentioned in it - <strong>Products not in your supplier&rsquo;s file</strong>, further down, says
+                  which.
                 </>
               )}
             </>

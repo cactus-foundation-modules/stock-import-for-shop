@@ -62,6 +62,9 @@ suite('the raw SQL this module ships, against a real Postgres', () => {
       CREATE TABLE "shp_products" (
         "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
         "sku" TEXT UNIQUE,
+        "name" TEXT NOT NULL DEFAULT '',
+        "status" TEXT NOT NULL DEFAULT 'ACTIVE',
+        "catalogue_hidden" BOOLEAN NOT NULL DEFAULT false,
         "type" TEXT NOT NULL DEFAULT 'PHYSICAL',
         "stock_count" INTEGER,
         "track_inventory" BOOLEAN NOT NULL DEFAULT false,
@@ -180,6 +183,92 @@ suite('the raw SQL this module ships, against a real Postgres', () => {
     expect(Number(rows.rows[0].remaining)).toBe(2)
   })
 
+  // The not-in-the-file list. Its query joins a table belonging to a module
+  // that may not be installed, and passes twenty thousand SKUs as one jsonb
+  // parameter rather than twenty thousand placeholders - two things that are
+  // either right or a 500 on a live catalogue, with nothing in between.
+  describe('the products a file does not mention', () => {
+    beforeAll(async () => {
+      await client.query(`DROP TABLE IF EXISTS "svr_variants"`)
+      await client.query(`DELETE FROM "shp_products"`)
+      await client.query(`
+        INSERT INTO "shp_products" ("id", "sku", "name", "status", "catalogue_hidden", "stock_count", "track_inventory")
+        VALUES
+          ('parent1', 'ZH000',   'Zure Headrest',                  'ACTIVE',   false, NULL, false),
+          ('child1',  'AC000012','Zure Headrest - White Mesh',     'ACTIVE',   true,  28,   true),
+          ('child2',  'AC000013','Zure Headrest - White Elastomer','DRAFT',    true,  0,    true),
+          ('lone1',   'D0001',   'Air Desk 1600',                  'ARCHIVED', false, 4,    false)
+      `)
+    })
+
+    it('names them, with the listing each variation belongs to', async () => {
+      await client.query(`
+        CREATE TABLE "svr_variants" (
+          "id" TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          "product_id" TEXT NOT NULL,
+          "child_product_id" TEXT NOT NULL UNIQUE
+        )
+      `)
+      await client.query(`
+        INSERT INTO "svr_variants" ("product_id", "child_product_id")
+        VALUES ('parent1', 'child1'), ('parent1', 'child2')
+      `)
+
+      const present = await client.query(`SELECT to_regclass('svr_variants')::text AS "present"`)
+      expect(present.rows[0].present).toBe('svr_variants')
+
+      const rows = await client.query(missingSql(true, null), [
+        JSON.stringify(['AC000012', 'AC000013', 'D0001']),
+      ])
+      // Variations sort under their listing and then by their own name, so
+      // Elastomer precedes Mesh; a product that is a listing itself sorts in
+      // among them by its own name, which puts the Air Desk first.
+      expect(rows.rows.map((r) => [r.sku, r.parent_name])).toEqual([
+        ['D0001', null],
+        ['AC000013', 'Zure Headrest'],
+        ['AC000012', 'Zure Headrest'],
+      ])
+      expect(rows.rows[1].catalogue_hidden).toBe(true)
+      expect(rows.rows[0].status).toBe('ARCHIVED')
+    })
+
+    it('honours the display cap', async () => {
+      const rows = await client.query(missingSql(true, 2), [
+        JSON.stringify(['AC000012', 'AC000013', 'D0001']),
+      ])
+      expect(rows.rowCount).toBe(2)
+    })
+
+    it('matches the shop spelling exactly, not case-insensitively', async () => {
+      // The normalisation lives in JS, once. If this query started matching
+      // loosely there would be two definitions of "the same code" free to drift.
+      const rows = await client.query(missingSql(true, null), [JSON.stringify(['ac000012'])])
+      expect(rows.rowCount).toBe(0)
+    })
+
+    it('takes a large list as one parameter rather than one each', async () => {
+      const many = Array.from({ length: 20_000 }, (_, i) => `BULK${i}`)
+      many.push('D0001')
+      const rows = await client.query(missingSql(true, null), [JSON.stringify(many)])
+      expect(rows.rows.map((r) => r.sku)).toEqual(['D0001'])
+    })
+
+    it('still answers when shop-variations is not installed', async () => {
+      await client.query(`DROP TABLE "svr_variants"`)
+      const absent = await client.query(`SELECT to_regclass('svr_variants')::text AS "present"`)
+      expect(absent.rows[0].present).toBeNull()
+
+      const rows = await client.query(missingSql(false, null), [
+        JSON.stringify(['AC000012', 'AC000013', 'D0001']),
+      ])
+      expect(rows.rows.map((r) => [r.sku, r.parent_name])).toEqual([
+        ['D0001', null],
+        ['AC000013', null],
+        ['AC000012', null],
+      ])
+    })
+  })
+
   it('prunes the log to the last fifty', async () => {
     for (let i = 0; i < 55; i++) {
       await client.query(
@@ -239,6 +328,30 @@ const leaseSql = `
     AND "status" IN ('FETCHING', 'APPLYING')
     AND ("lease_until" IS NULL OR "lease_until" < CURRENT_TIMESTAMP)
 `
+
+function missingSql(withParents: boolean, limit: number | null): string {
+  const limitClause = limit === null ? '' : `LIMIT ${limit}`
+  if (withParents) {
+    return `
+      SELECT p."id", p."sku", p."name", p."status", p."stock_count", p."track_inventory",
+             p."catalogue_hidden", parent."id" AS "parent_id", parent."name" AS "parent_name"
+      FROM "shp_products" p
+      LEFT JOIN "svr_variants" v ON v."child_product_id" = p."id"
+      LEFT JOIN "shp_products" parent ON parent."id" = v."product_id"
+      WHERE p."sku" IN (SELECT jsonb_array_elements_text($1::jsonb))
+      ORDER BY COALESCE(parent."name", p."name") ASC, p."name" ASC
+      ${limitClause}
+    `
+  }
+  return `
+    SELECT p."id", p."sku", p."name", p."status", p."stock_count", p."track_inventory",
+           p."catalogue_hidden", NULL::text AS "parent_id", NULL::text AS "parent_name"
+    FROM "shp_products" p
+    WHERE p."sku" IN (SELECT jsonb_array_elements_text($1::jsonb))
+    ORDER BY p."name" ASC
+    ${limitClause}
+  `
+}
 
 function batchSql(enableTracking: boolean, pairs: number): string {
   const tracking = enableTracking

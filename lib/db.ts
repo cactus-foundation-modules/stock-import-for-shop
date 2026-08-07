@@ -5,6 +5,7 @@ import type {
   StkJobStatus,
   StkJobStatusPayload,
   StkLogEntry,
+  StkMissingProduct,
   StkSettings,
   StkSettingsPatch,
   StkTrigger,
@@ -396,6 +397,93 @@ export async function getSkuStock(): Promise<ShopSku[]> {
     tracked: row.track_inventory === true,
     physical: row.type === 'PHYSICAL',
   }))
+}
+
+/**
+ * Whether shop-variations is installed, asked of the database rather than
+ * assumed. Its table is the only thing that knows which listing a hidden
+ * variation belongs to, and on a catalogue where all but a few hundred products
+ * are variations that is the difference between a list of product codes and a
+ * list somebody can act on. It is not a declared dependency of this module, so
+ * the join happens only when the table is actually there.
+ */
+async function hasVariantTable(): Promise<boolean> {
+  const rows = await prisma.$queryRaw<{ present: string | null }[]>`
+    SELECT to_regclass('svr_variants')::text AS "present"
+  `
+  return !!rows[0]?.present
+}
+
+type MissingRow = {
+  id: string
+  sku: string
+  name: string
+  status: string
+  stock_count: number | null
+  track_inventory: boolean
+  catalogue_hidden: boolean
+  parent_id: string | null
+  parent_name: string | null
+}
+
+function mapMissing(row: MissingRow): StkMissingProduct {
+  return {
+    id: row.id,
+    sku: row.sku,
+    name: row.name,
+    status: row.status as StkMissingProduct['status'],
+    stock: row.stock_count === null ? null : Number(row.stock_count),
+    tracked: row.track_inventory === true,
+    hidden: row.catalogue_hidden === true,
+    parentId: row.parent_id,
+    parentName: row.parent_name,
+  }
+}
+
+/**
+ * Fills in the details of the products a file did not mention, given their SKUs.
+ *
+ * The SKUs handed in are the shop's own spellings, read back out of
+ * shp_products, so this matches them exactly. Repeating the file's
+ * case-insensitive normalisation in SQL would mean two definitions of "the same
+ * code" that could drift apart, and a list that disagrees with the count beside
+ * it is worse than no list.
+ *
+ * They arrive as one jsonb parameter rather than a placeholder each, because
+ * there can be twenty thousand of them and a statement with twenty thousand
+ * bind parameters is a different kind of problem.
+ *
+ * Ordered so variations sit under the listing they belong to, and a listing with
+ * no variations sorts in among them by its own name.
+ */
+export async function listMissingProducts(skus: string[], limit: number | null): Promise<StkMissingProduct[]> {
+  if (skus.length === 0) return []
+  const payload = JSON.stringify(skus)
+  const limitClause = limit === null ? Prisma.empty : Prisma.sql`LIMIT ${limit}`
+
+  if (await hasVariantTable()) {
+    const rows = await prisma.$queryRaw<MissingRow[]>`
+      SELECT p."id", p."sku", p."name", p."status", p."stock_count", p."track_inventory",
+             p."catalogue_hidden", parent."id" AS "parent_id", parent."name" AS "parent_name"
+      FROM "shp_products" p
+      LEFT JOIN "svr_variants" v ON v."child_product_id" = p."id"
+      LEFT JOIN "shp_products" parent ON parent."id" = v."product_id"
+      WHERE p."sku" IN (SELECT jsonb_array_elements_text(${payload}::jsonb))
+      ORDER BY COALESCE(parent."name", p."name") ASC, p."name" ASC
+      ${limitClause}
+    `
+    return rows.map(mapMissing)
+  }
+
+  const rows = await prisma.$queryRaw<MissingRow[]>`
+    SELECT p."id", p."sku", p."name", p."status", p."stock_count", p."track_inventory",
+           p."catalogue_hidden", NULL::text AS "parent_id", NULL::text AS "parent_name"
+    FROM "shp_products" p
+    WHERE p."sku" IN (SELECT jsonb_array_elements_text(${payload}::jsonb))
+    ORDER BY p."name" ASC
+    ${limitClause}
+  `
+  return rows.map(mapMissing)
 }
 
 /**

@@ -28,6 +28,14 @@ description. Stock counts only.
 - **A choice about products the file does not mention.** Leave them alone (the
   default, and the right answer when the file is one supplier's range) or treat
   them as out of stock (right only when it is the whole catalogue).
+- **A list of the products it does not mention, not just a count.** "412 of your
+  products are not in the file" could be a range the supplier has quietly
+  dropped, a batch imported under the wrong codes, or four hundred variations of
+  one chair, and no amount of staring at the number tells them apart. So the
+  Stock tab names them: code, product, the listing each variation belongs to,
+  whether it is live, and the count it is still sitting on - each linking
+  straight to the product, searchable, and downloadable as a spreadsheet for the
+  email to the supplier that usually follows.
 - **Optional enforcement.** A tickbox switches the shop's own inventory tracking
   on for the products it updates, so the shop actually stops selling something
   once it has run out. Off by default: recording a number and enforcing it are
@@ -92,8 +100,18 @@ through the `shop.settings-sub-tabs` slot; shop lends the space and nothing else
 
 ## Permissions
 
-No permission keys of its own. Settings need `shop.manage`; the Products page
-button needs `shop.products`.
+No permission keys of its own. Settings and the not-in-the-file list need
+`shop.manage`; the Products page button needs `shop.products`.
+
+## Talking to other modules
+
+The not-in-the-file list reads `svr_variants` when **shop-variations** happens
+to be installed, purely to say which listing a variation belongs to. On a
+catalogue where all but a few hundred of twenty thousand products are
+variations, "Eclipse Plus Task Operator Office Chair - Black Bonded Leather" on
+its own is not enough to act on. It is a read, guarded by `to_regclass`, and
+shop-variations is deliberately not a declared dependency: without it the column
+simply says every product is a listing of its own.
 
 ## Tables
 
@@ -106,6 +124,7 @@ listed in the manifest's `teardown`.
 | --- | --- |
 | `GET/PUT /api/m/stock-import-for-shop/admin/settings` | Read and save settings |
 | `POST /api/m/stock-import-for-shop/admin/test` | Probe a feed and report, changing nothing |
+| `GET /api/m/stock-import-for-shop/admin/missing` | The shop's products the saved feed does not mention. `?format=csv` downloads the lot; the JSON form is capped at 2,000 rows for the screen |
 | `POST /api/m/stock-import-for-shop/admin/run` | Start a run |
 | `POST /api/m/stock-import-for-shop/admin/run/step` | Apply the next slice of an unfinished run |
 | `GET /api/m/stock-import-for-shop/admin/run/status` | Progress, and whether a feed is set up |
