@@ -1,6 +1,6 @@
 {
   "name": "cactus-module-stock-import-for-shop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Stock Imports for Shop module for Cactus - refresh shop stock counts from a supplier CSV url, on a schedule you choose or on demand",
   "license": "MIT"

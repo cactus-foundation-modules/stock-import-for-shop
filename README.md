@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="module-art.webp" alt="Stock Imports for Shop" width="640" />
+</p>
+
 # Stock Imports for Shop
 
 Keeps a Cactus shop's stock counts in step with a supplier's stock file. Give it
